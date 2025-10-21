@@ -1,19 +1,22 @@
 import {chromium} from 'playwright';
 import ora from 'ora';
 import chalk from 'chalk';
+import path from 'path';
+import fs from 'fs';
+import { parse } from 'json2csv';
 import { error } from 'console';
 
 (async () => {
-    const spinner = ora('loading...').start();
+    const spinner = ora('').start();
     const browser = await chromium.launch({
         headless: false,
         slowMo: 100,
     });
     const page = await browser.newPage();
 
-    spinner.text = 'loading...';
+    // spinner.text = 'loading...';
     await page.goto(
-        'https://www.youtube.com/watch?v=aYCCt83fv74', {
+        'https://www.youtube.com/watch?v=B2nY9RKXMUY', {
             waitUntil: 'networkidle'
     });
 
@@ -66,46 +69,124 @@ import { error } from 'console';
     });
 
     // Comment
-    for (let i = 0; i < 3; i++) {
-        await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-        await page.waitForTimeout(1500);
+    console.log(chalk.gray('🌀 Scrolling comments...'));
+    let prevCommentCount = 0;
+    let prevLoaded = 0;
+    let stableRounds = 0;
+    let totalComment = 0;
+    const startTime = Date.now();
+
+    try {
+        await page.waitForSelector('ytd-comments-header-renderer #count .count-text span', { timeout: 5000 });
+        totalComment = await page.evaluate(() => {
+            const el = document.querySelector('ytd-comments-header-renderer #count .count-text');
+            if (!el) return 0;
+            const match = el.textContent.match(/[\d,.]+/);
+            return match ? parseInt(match[0].replace(/[,.]/g, '')) : 0;
+        });
+    } catch {
+        totalComment = 0;
     }
+
+    console.log(chalk.gray(`💬 Estimated total comments: ${totalComment || 'Unknown'}`));
+    
+    while (true) {
+        await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+        await page.waitForTimeout(2500);
+
+        const currentLoaded = await page.$$eval('#content #content-text', els => els.length);
+
+        if (currentLoaded > prevLoaded) {
+            const progress = totalComment ? ((currentLoaded / totalComment) * 100).toFixed(1) : '...';
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            spinner.text = chalk.cyan(`🔽 Loaded ${currentLoaded} comments (${progress}% | ${elapsed}s elapsed)`);
+            prevLoaded = currentLoaded;
+        }
+
+        if (currentLoaded === prevCommentCount) {
+            stableRounds++;
+            if (stableRounds >= 5) break;
+        } else {
+            stableRounds = 0;
+            prevCommentCount = currentLoaded;
+        }
+    }
+
+    console.log(chalk.gray('\t✅ All Comments loaded.'));
     
     await page.waitForSelector('ytd-comments-header-renderer #count .count-text span');
 
-    const comment   = await page.evaluate(() => {
-        const el = document.querySelector('ytd-comments-header-renderer #count .count-text');
-        if (!el) return null;
+    // Path Comment
+    const saveTitle = title.replace(/[<>:"/\\|?*]+/g, '').replace(/[^\w\s-]/g, '').replace(/\s+/g, '_').trim();
+    const outputDir = path.join(process.cwd(), 'scrapes', saveTitle);
+    fs.mkdirSync(outputDir, {recursive: true});
 
-        const text = el.textContent.trim();
-        return text.match(/[\d,.]+/) ? text.replace(/,/g, '') : null;
+    // Replies Comment
+    console.log(chalk.gray('\t🧩 Expanding all replies...'));
+    let expandedCount = 0;
+    let prevReplyCount = 0;
+
+    for (let i = 0; i < 20; i++) {
+        const buttons = await page.$$('ytd-button-renderer#more-replies');
+        if (buttons.length === 0) {
+            stableRounds++;
+            if (stableRounds >= 3) break;
+        } else {
+            for (const btn of buttons) {
+                try {
+                    await btn.click();
+                    expandedCount++;
+                    await page.waitForTimeout(1000);
+                } catch {}
+            }
+        }
+        await page.waitForTimeout(2000);
+
+        const currentReplies = await page.$$eval('ytd-comment-renderer #content #content-text', els => els.length);
+        if (currentReplies === prevReplyCount) {
+            stableRounds++;
+            if (stableRounds >= 3) break;
+        } else {
+            stableRounds = 0;
+            prevReplyCount = currentReplies;
+        }
+    }
+    
+    console.log(chalk.gray(`\t✅ Expanded ${expandedCount} reply sections.`));
+
+    // Download Comment
+    const comments = await page.$$eval('#content #content-text', els =>
+        els.map(e => e.textContent.trim()).filter(Boolean)
+    );
+
+    if (comments.length) {
+        const csv = parse(comments.map((comment, i) => ({ No: i + 1, Comment:comment})));
+        const filePath = path.join(outputDir, 'youtube_comments.csv');
+        fs.writeFileSync(filePath, csv, 'utf-8');
+
+        console.log(chalk.greenBright(`\n💾 ${comments.length} comments saved to ${filePath}`));
+    } else {
+        console.log(chalk.red('⚠️ No comments found.'));
+    }
+
+    const stats = await page.evaluate(() => {
+        const replies = document.querySelectorAll('ytd-button-renderer#more-replies').length;
+        return {comments, replies};
     });
+    console.log(chalk.cyan(`🧮 Main comments: ${stats.totalComment}, Replies: ${stats.replies}\n`));
 
-    spinner.succeed('Success');
+    spinner.succeed(`Success\n`);
 
     console.log(`${chalk.cyan.bold("📹 Title       :")} ${chalk.cyan(title)}`);
     console.log(`${chalk.yellow.bold("📺 Channel     :")} ${chalk.yellow(channel)}`);
     console.log(`${chalk.magenta.bold("👥 Subscriber  :")} ${chalk.magenta(subs)}`);
-    console.log(`${chalk.blue.bold("⏳ Duration     :")} ${chalk.blue(times)}`);
+    console.log(`${chalk.blue.bold("⏳ Duration    :")} ${chalk.blue(times)}`);
     console.log(`${chalk.redBright.bold("👁️  Views       :")} ${chalk.redBright(views)}`);
     console.log(`${chalk.green.bold("👍 Likes       :")} ${chalk.green(likeCount)}`);
-    console.log(`${chalk.gray.bold("💬 Comments    :")} ${chalk.gray(comment)}\n`);
+    console.log(`${chalk.gray.bold("💬 Comments    :")} ${chalk.gray(totalComment)}\n`);
 
     console.log(`${chalk.white.bold("📃 Description :")}`);
     console.log(chalk.white(description));
-
-
-    // console.log(`
-    //     📹 Judul       : ${title}
-    //     📺 Channel     : ${channel}
-    //     👥 Subscriber  : ${subs}
-    //     ⏳ Times       : ${times}
-    //     👁️  Views       : ${views}
-    //     👍 Like        : ${likeCount}
-    //     💬 Comment     : ${comment}
-    //     📃 Description : ${description ? description : 'Not Found'} 
-    // `);
-    // panjang desc dibatas : ${description ? description.slice(0, 200) + '...' : 'Not Found'}
         
     await browser.close();
 })();
